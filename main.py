@@ -8,6 +8,7 @@ GitHub Actions가 아침에 30분마다 이 파일을 실행한다.
 import datetime as dt
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -23,6 +24,8 @@ KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY", "")
 KAKAO_CLIENT_SECRET = os.environ.get("KAKAO_CLIENT_SECRET", "")
 KAKAO_REFRESH_TOKEN = os.environ.get("KAKAO_REFRESH_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GCAL_ICS_URL = os.environ.get("GCAL_ICS_URL", "")  # 구글 캘린더 '비공개 주소(iCal 형식)'
+DEFAULT_REMIND = [7, 1, 0]  # 캘린더 일정은 일주일 전·하루 전·당일에 알림
 FORCE = os.environ.get("FORCE", "").lower() == "true"  # 테스트: 시간·중복 검사 없이 바로 보내기
 
 
@@ -139,6 +142,70 @@ def build_message(item, days):
     return "\n".join(lines)
 
 
+def fmt_time(t):
+    ampm = "오전" if t.hour < 12 else "오후"
+    h12 = t.hour % 12 or 12
+    mm = f" {t.minute}분" if t.minute else ""
+    return f"{ampm} {h12}시{mm}({t:%H:%M})"
+
+
+def parse_remind(desc, recurring=False):
+    """설명에 '알림: 3,1,0' 이라고 적으면 그 날짜에 알림. 없으면 기본값 (반복 일정은 당일만)."""
+    m = re.search(r"알림\s*[:：]\s*([\d,\s]+)", desc or "")
+    if m:
+        days = [int(x) for x in re.findall(r"\d+", m.group(1))]
+        if days:
+            return days
+    return [0] if recurring else DEFAULT_REMIND
+
+
+def load_calendar_events(today):
+    """구글 캘린더에서 오늘~앞으로 31일 일정을 가져와 schedules.json 과 같은 모양으로 바꾼다."""
+    if not GCAL_ICS_URL:
+        return []
+    import icalendar
+    import recurring_ical_events
+
+    try:
+        r = requests.get(GCAL_ICS_URL, timeout=30)
+        r.raise_for_status()
+        cal = icalendar.Calendar.from_ical(r.content)
+    except Exception as e:
+        print(f"구글 캘린더 읽기 실패: {e}")
+        return []
+
+    start = dt.datetime.combine(today, dt.time(0), KST)
+    recurring_uids = {str(c.get("UID")) for c in cal.walk("VEVENT") if "RRULE" in c}
+    events = []
+    for ev in recurring_ical_events.of(cal).between(start, start + dt.timedelta(days=32)):
+        title = str(ev.get("SUMMARY", "(제목 없음)")).strip()
+        s = ev.get("DTSTART").dt
+        parts = []
+        if isinstance(s, dt.datetime):
+            s = s.astimezone(KST) if s.tzinfo else s.replace(tzinfo=KST)
+            date = s.date()
+            parts.append(fmt_time(s))
+        else:  # 하루 종일 일정
+            date = s
+        loc = str(ev.get("LOCATION", "")).strip()
+        if loc:
+            parts.append(loc)
+        desc = str(ev.get("DESCRIPTION", "")).strip()
+        first_line = re.sub(r"<[^>]+>", " ", desc).split("\n")[0].strip()
+        if first_line and not first_line.startswith("알림"):
+            parts.append(first_line[:60])
+        events.append(
+            {
+                "title": title,
+                "date": date.isoformat(),
+                "remind_days_before": parse_remind(desc, str(ev.get("UID")) in recurring_uids),
+                "note": " / ".join(parts),
+            }
+        )
+    print(f"구글 캘린더에서 일정 {len(events)}개 읽음")
+    return events
+
+
 def load_json(path, default):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -161,6 +228,11 @@ def main():
             return
 
     schedules = load_json(HERE / "schedules.json", {"schedules": []})["schedules"]
+    seen = {(s["title"], s["date"]) for s in schedules}
+    for ev in load_calendar_events(today):  # 같은 제목·날짜는 한 번만
+        if (ev["title"], ev["date"]) not in seen:
+            schedules.append(ev)
+            seen.add((ev["title"], ev["date"]))
     due = []
     for item in schedules:
         days = (dt.date.fromisoformat(item["date"]) - today).days
