@@ -50,8 +50,17 @@ def get_kakao_access_token():
     return data["access_token"], new_refresh
 
 
-def send_kakao(access_token, text):
-    """카톡 텍스트 메시지는 200자 제한이 있어서 길면 나눠 보낸다."""
+CALENDAR_URL = "https://calendar.google.com/calendar/r"
+
+
+def calendar_day_url(date):
+    """구글 캘린더의 그 날짜 화면 주소."""
+    return f"{CALENDAR_URL}/day/{date.year}/{date.month}/{date.day}"
+
+
+def send_kakao(access_token, text, link_url=CALENDAR_URL):
+    """카톡 텍스트 메시지는 200자 제한이 있어서 길면 나눠 보낸다.
+    메시지나 '구글 캘린더 열기' 버튼을 누르면 link_url(구글 캘린더)로 이동한다."""
     for chunk in split_text(text, 200):
         r = requests.post(
             "https://kapi.kakao.com/v2/api/talk/memo/default/send",
@@ -61,7 +70,8 @@ def send_kakao(access_token, text):
                     {
                         "object_type": "text",
                         "text": chunk,
-                        "link": {"web_url": "https://calendar.google.com", "mobile_web_url": "https://calendar.google.com"},
+                        "link": {"web_url": link_url, "mobile_web_url": link_url},
+                        "button_title": "📅 구글 캘린더 열기",
                     },
                     ensure_ascii=False,
                 )
@@ -247,7 +257,7 @@ def main():
 
     if due:
         for item, days in due:
-            send_kakao(access_token, build_message(item, days))
+            send_kakao(access_token, build_message(item, days), calendar_day_url(dt.date.fromisoformat(item["date"])))
             print(f"보냄: {item['title']} ({d_label(days)})")
     else:  # 테스트인데 오늘 알릴 일정이 없을 때 → 다가오는 일정 목록
         upcoming = sorted(
