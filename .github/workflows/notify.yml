@@ -1,0 +1,49 @@
+name: AI 비서 알림
+
+on:
+  schedule:
+    # GitHub 시간은 UTC(한국 -9시간). 정각에 안 돌 수 있어서 한국 시간 05:00~14:30 동안 30분마다 실행하고,
+    # 코드가 "8시 지났는지 + 오늘 이미 보냈는지"를 보고 딱 한 번만 보낸다.
+    - cron: "*/30 20-23 * * *"  # 한국 05:00~08:30
+    - cron: "*/30 0-5 * * *"    # 한국 09:00~14:30
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "테스트: 시간 상관없이 지금 바로 보내기"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write  # sent_log.json(보낸 날짜 기록)을 저장하기 위한 권한
+
+concurrency:
+  group: notify
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 준비
+        run: python3 -m pip install --quiet requests
+
+      - name: 알림 보내기
+        env:
+          KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+          KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
+          KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: python3 main.py
+
+      - name: 보낸 기록 저장
+        run: |
+          if [ -n "$(git status --porcelain sent_log.json)" ]; then
+            git config user.name "ai-secretary-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add sent_log.json
+            git commit -m "보낸 기록 저장"
+            git push
+          fi
